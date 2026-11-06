@@ -10,12 +10,16 @@
           FULL_MAX_TOKENS visual tokens are cut into the fewest equal non-overlapping segments; tg_generic alone
           -> g_full(t) = sigmoid(logits) per candidate.                                 (2 GPU)
 
+  window_gen  same windows as `window`; the two queries of each window are written once per video by InternVL
+          (gen_intern.py): [tg_gen, qa_gen (A action / B ordinary / C before-after / D none)] -> g_gen(t), qa_probs.  (1 GPU)
+
 Output: outputs/<dataset>/raw_<stage>/<video>.json (resumable: done videos are skipped unless --redo).
 """
 from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import math
 import time
 import traceback
@@ -31,7 +35,8 @@ def main() -> int:
     import os
     os.umask(0)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('stage', choices=['window', 'global', 'full'])
+    ap.add_argument('stage', choices=['window', 'global', 'full', 'window_gen'])
+    ap.add_argument('--gen-dir', type=Path, help='window_gen: InternVL texts (default outputs/<dataset>/gen_intern)')
     ap.add_argument('--dataset', choices=list(vj.DATA), required=True)
     ap.add_argument('--videos-file', type=Path, help='default: every test video of --dataset')
     ap.add_argument('--only-video', action='append', default=[])
@@ -97,18 +102,26 @@ def main() -> int:
         try:
             video = vj.Video(paths[stem])
             res.update(duration=video.duration, source_fps=video.fps, source_frames=video.frames)
-            if args.stage == 'window':
+            if args.stage in ('window', 'window_gen'):
+                if args.stage == 'window':
+                    qs, tg, qa = vj.WINDOW_QUERIES, 'tg_generic', 'qa_generic'
+                else:
+                    gen = json.loads(((args.gen_dir or vj.OUT / args.dataset / 'gen_intern') / f'{stem}.json').read_text())
+                    if not gen.get('ok'):
+                        raise RuntimeError(f'no InternVL text for this video: {gen.get("error")}')
+                    qs, tg, qa = gen['videojev_queries'], 'tg_gen', 'qa_gen'
+                    res['queries'] = qs
                 wins = []
                 for a, b in vj.fixed_windows(video.duration)[:args.max_windows]:
                     fr, tm, eff, d = video.window(a, b, vj.WINDOW_FPS)
-                    rec, ans, _ = ask(fr, tm, eff, d, vj.WINDOW_QUERIES, vj.CONTEXT)
+                    rec, ans, _ = ask(fr, tm, eff, d, qs, vj.CONTEXT)
                     wins.append(dict(window=[a, b], n_frames=len(tm), grid_thw=rec['grid_thw'],
                                      score_times_abs=(np.asarray(rec['score_times']) + a).tolist(),
                                      score_bounds_abs=(np.asarray(rec['score_bounds']) + a).tolist(),
-                                     g=ans['tg_generic']['p'], logits=ans['tg_generic']['logits'],
-                                     q_window=ans['qa_generic']['p'][0], qa_probs=ans['qa_generic']['p']))
+                                     g=ans[tg]['p'], logits=ans[tg]['logits'],
+                                     q_window=ans[qa]['p'][0], qa_probs=ans[qa]['p']))
                 res.update(fps=vj.WINDOW_FPS, windows=wins, complete=args.max_windows is None)
-                msg = f'{len(wins)} windows, max q_window {max(w["q_window"] for w in wins):.2f}'
+                msg = f'{len(wins)} windows, max P(A) {max(w["q_window"] for w in wins):.2f}'
             elif args.stage == 'global':
                 fr, tm, eff, d = video.window(0., video.duration, vj.GLOBAL_FPS)
                 rec, ans, _ = ask(fr, tm, eff, d, [vj.QA_GLOBAL], vj.CONTEXT)

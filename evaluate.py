@@ -28,9 +28,13 @@ def main() -> int:
     ap.add_argument('--dataset', choices=list(vj.DATA), required=True)
     ap.add_argument('--mode', default='gl_v10')
     ap.add_argument('--dir', type=Path, help='default: outputs/<dataset>/<mode>')
+    ap.add_argument('--videos-file', type=Path, help='evaluate only these videos (pilot)')
     args = ap.parse_args()
     d = args.dir or vj.OUT / args.dataset / args.mode
     ann = vj.load_annotations(args.dataset)
+    if args.videos_file:
+        keep = {x.strip() for x in args.videos_file.read_text().splitlines() if x.strip()}
+        ann = {k: v for k, v in ann.items() if k in keep}
     rows, missing = [], []
     for v, spans_f in sorted(ann.items()):
         p = d / 'timeline' / f'{v}.json'
